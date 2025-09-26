@@ -8,9 +8,16 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <time.h>
 
 #define MAX_ARGS 100
 #define MAX_CMDS 20
+
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
 
 void parse_command(char *line, char **args) {
     int pos = 0;
@@ -90,11 +97,12 @@ void handle_pipe(char *line) {
     }
 }
 
-void print_profile(struct timeval start, struct timeval end, struct rusage usage, char *cmd, FILE *out) {
-    double real = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec)/1e6;
-    double user = usage.ru_utime.tv_sec + usage.ru_utime.tv_usec/1e6;
-    double sys = usage.ru_stime.tv_sec + usage.ru_stime.tv_usec/1e6;
+void print_profile(const char *cmd, struct timespec start, struct timespec end, struct rusage usage, FILE *out) {
+    double real = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    double user = usage.ru_utime.tv_sec + usage.ru_utime.tv_usec / 1e6;
+    double sys = usage.ru_stime.tv_sec + usage.ru_stime.tv_usec / 1e6;
     long mem = usage.ru_maxrss;
+    fprintf(out, "-----------------------------\n");
     fprintf(out, "Comando: %s\n", cmd);
     fprintf(out, "Tiempo real: %.6f s\n", real);
     fprintf(out, "Tiempo usuario: %.6f s\n", user);
@@ -104,10 +112,26 @@ void print_profile(struct timeval start, struct timeval end, struct rusage usage
 }
 
 void run_miprof(char **args, int argc) {
+    if (argc >= 2 && strcmp(args[1], "-h") == 0) {
+        printf("Uso: miprof [ejec|ejecsave archivo|maxtiempo segundos] comando args\n");
+        printf("Descripción:\n");
+        printf("  miprof permite ejecutar comandos mostrando información de tiempo y memoria.\n");
+        printf("  Modos disponibles:\n");
+        printf("    ejec     :    Ejecuta el comando y muestra el perfil por pantalla.\n");
+        printf("    ejecsave :    Guarda el perfil en el archivo especificado.\n");
+        printf("    maxtiempo:    Ejecuta el comando con un límite de tiempo (segundos).\n");
+        printf("Ejemplos:\n");
+        printf("  miprof ejec ls -l\n");
+        printf("  miprof ejecsave salida.txt ls -l\n");
+        printf("  miprof maxtiempo 5 sleep 10\n");
+        return;
+    }
+
     if (argc < 3) {
         printf("Uso: miprof [ejec|ejecsave archivo|maxtiempo segundos] comando args\n");
         return;
     }
+
     char mode[32];
     strncpy(mode, args[1], 31);
     mode[31] = 0;
@@ -122,9 +146,15 @@ void run_miprof(char **args, int argc) {
             printf("Uso: miprof ejecsave archivo comando args\n");
             return;
         }
-        out = fopen(args[2], "a");
-        if (!out) {
+        int fd = open(args[2], O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd == -1) {
             perror("No se pudo abrir archivo");
+            return;
+        }
+        out = fdopen(fd, "a");
+        if (!out) {
+            perror("fdopen");
+            close(fd);
             return;
         }
         cmd_start = 3;
@@ -142,45 +172,39 @@ void run_miprof(char **args, int argc) {
         if (i < argc - 1) strcat(cmdline, " ");
     }
 
-    struct timeval start, end;
+    struct timespec start, end;
     struct rusage usage;
     pid_t pid;
-    gettimeofday(&start, NULL);
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
     pid = fork();
     if (pid == 0) {
         if (timeout > 0) {
-            alarm(timeout);
+            struct itimerval it;
+            it.it_value.tv_sec = timeout;
+            it.it_value.tv_usec = 0;
+            it.it_interval.tv_sec = 0;
+            it.it_interval.tv_usec = 0;
+            setitimer(ITIMER_REAL, &it, NULL);
         }
         execvp(args[cmd_start], &args[cmd_start]);
         perror("Error ejecutando comando");
         exit(EXIT_FAILURE);
     } else if (pid > 0) {
         int status;
-        if (timeout > 0) {
-            int finished = 0;
-            for (int i = 0; i < timeout * 10; i++) {
-                usleep(100000);
-                pid_t res = waitpid(pid, &status, WNOHANG);
-                if (res == pid) {
-                    finished = 1;
-                    break;
-                }
+        wait4(pid, &status, 0, &usage);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        if (timeout > 0 && WIFSIGNALED(status)) {
+            int sig = WTERMSIG(status);
+            if (sig == SIGALRM || sig == SIGKILL) {
+                fprintf(out, "El comando no ha podido ejecutarse por exceso de tiempo\n");
             }
-            if (!finished) {
-                kill(pid, SIGKILL);
-                waitpid(pid, &status, 0);
-                fprintf(out, "Comando terminado por exceder tiempo máximo (%d s)\n", timeout);
-            }
-        } else {
-            waitpid(pid, &status, 0);
         }
-        gettimeofday(&end, NULL);
-        getrusage(RUSAGE_CHILDREN, &usage);
-        print_profile(start, end, usage, cmdline, out);
+        print_profile(cmdline, start, end, usage, out);
         if (out != stdout) fclose(out);
     } else {
         perror("Error en fork");
+        if (out != stdout) fclose(out);
     }
 }
 

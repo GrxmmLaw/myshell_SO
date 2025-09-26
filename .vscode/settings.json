@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "SHELL.C": "cpp",
+        "stat.h": "c"
+    }
+}
