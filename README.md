@@ -102,14 +102,3 @@ Para salir, escribe:
 ```sh
 exit
 ```
-
----
-
-## Requisitos
-
-- Linux
-- GCC
-
----
-
-¡Disfruta usando noha_shell!
