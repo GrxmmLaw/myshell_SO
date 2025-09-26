@@ -4,9 +4,9 @@ Consola de Linux desarrollada para el curso de Sistemas Operativos.
 
 ## Integrantes
 - Ignacio Barria
+- Camilo Tapia
 - Franco Vidal
 - Iván Zapata
-
 ---
 
 ## Compilación
